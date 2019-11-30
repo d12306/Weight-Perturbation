@@ -9,7 +9,8 @@ import torchvision.transforms as transforms
 from utils import AverageMeter, RecorderMeter, time_string, convert_secs2time
 from model import CifarResNet
 from copy import deepcopy
-
+import numpy as np
+import math
 
 def accuracy(output, target, topk=(1,)):
   """Computes the precision@k for the specified values of k"""
@@ -152,6 +153,8 @@ def adv_train(train_loader, model, criterion, optimizer, epoch, log, args):
 # train function (forward, backward, update)
 def dis_train(train_loader, model, criterion, optimizer, epoch, log, args, discriminator, discriminator_optim,\
  model_initial):
+  dis_step = 1
+  clf_step = 1
   batch_time = AverageMeter()
   data_time = AverageMeter()
   losses = AverageMeter()
@@ -162,15 +165,6 @@ def dis_train(train_loader, model, criterion, optimizer, epoch, log, args, discr
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   criterion_dis = torch.nn.BCEWithLogitsLoss()
 
-  noises = {}
-  excluded_params = []
-  for _m in model.modules():
-      if isinstance(_m, torch.nn.BatchNorm1d) or \
-              isinstance(_m, torch.nn.BatchNorm2d) or \
-              isinstance(_m, torch.nn.BatchNorm3d):
-          for _k, _p in _m.named_parameters():
-              excluded_params.append(_p)
-
   end = time.time()
   total_loss_dis = 0
   total_accuracy_dis = 0
@@ -179,7 +173,6 @@ def dis_train(train_loader, model, criterion, optimizer, epoch, log, args, discr
     iterations += 1
     # measure data loading time
     data_time.update(time.time() - end)
-
     if args.use_cuda:
       target = target.cuda()
       input = input.cuda()
@@ -188,21 +181,34 @@ def dis_train(train_loader, model, criterion, optimizer, epoch, log, args, discr
 
 
     import random
-    prob = random.uniform(0, 1)
+    prob = random.uniform(0, 1)    
     if prob < 1:
-      model_copy = deepcopy(model)
+      #change parameters.
+      model_copy = deepcopy(model)#model_initial
+      noises = {}
+      excluded_params = []
+      for _m in model_copy.modules():
+          if isinstance(_m, torch.nn.BatchNorm1d) or \
+                  isinstance(_m, torch.nn.BatchNorm2d) or \
+                  isinstance(_m, torch.nn.BatchNorm3d):
+              for _k, _p in _m.named_parameters():
+                  excluded_params.append(_p)
+
       layer_limit = 0
       for key, p in model_copy.named_parameters():
         layer_limit += 1
         if any([p is pp for pp in excluded_params]):
+              # print('mark!')
               continue
         noise = (torch.cuda.FloatTensor(p.size()).uniform_() * 2. - 1.)
         noise_shape = noise.shape
         noise_norms = noise.view([noise_shape[0],-1]).norm(p=2, dim=1) + 1.0e-6
         p_norms = p.view([noise_shape[0], -1]).norm(p=2, dim=1)
+        #for boardcasting. 
         for shape_idx in range(1, len(noise_shape)):
             noise_norms = noise_norms.unsqueeze(-1)
             p_norms = p_norms.unsqueeze(-1)
+        # print(noise_shape)
         noise = noise / noise_norms * p_norms.data
         noise_coef = 1.0
         noise = noise * noise_coef
@@ -210,17 +216,15 @@ def dis_train(train_loader, model, criterion, optimizer, epoch, log, args, discr
         p.data.add_(noise)
         # if layer_limit > 1:
         #   break
-
-      
-      model_copy.eval()
+      # model_copy.eval()
       set_requires_grad(model_copy, requires_grad=False)
       # compute output
       output, features_target = model(input_var)
       _, features_source = model_copy(input_var)
-
+      
       set_requires_grad(model, requires_grad=False)
       set_requires_grad(discriminator, requires_grad=True)
-      for _ in range(2):
+      for _ in range(dis_step):
           discriminator_x = torch.cat([features_source, features_target])
           discriminator_y = torch.cat([torch.ones(features_source.shape[0], device=device),
                                        torch.zeros(features_target.shape[0], device=device)])
@@ -234,12 +238,11 @@ def dis_train(train_loader, model, criterion, optimizer, epoch, log, args, discr
       # Train classifier
       set_requires_grad(model, requires_grad=True)
       set_requires_grad(discriminator, requires_grad=False)
-      for _ in range(1):
+      for _ in range(clf_step):
           # flipped labels
           discriminator_y = torch.ones(features_target.shape[0], device=device)
           preds = discriminator(features_target).squeeze()
           loss = criterion_dis(preds, discriminator_y)
-
           optimizer.zero_grad()
           loss.backward(retain_graph=True)
           optimizer.step()
@@ -255,10 +258,10 @@ def dis_train(train_loader, model, criterion, optimizer, epoch, log, args, discr
     # compute gradient and do SGD step
     optimizer.zero_grad()
     loss.backward()
-    # for key, p in model.named_parameters():
-    #   if key in noises:
-    #     p.data.sub_(noises[key])
     optimizer.step()
+    if math.isnan(loss.data.cpu().numpy()):
+      import ipdb
+      ipdb.set_trace()
 
     # measure elapsed time
     batch_time.update(time.time() - end)
@@ -273,11 +276,12 @@ def dis_train(train_loader, model, criterion, optimizer, epoch, log, args, discr
             'Prec@5 {top5.val:.3f} ({top5.avg:.3f})   '.format(
             epoch, i, len(train_loader), batch_time=batch_time,
             data_time=data_time, loss=losses, top1=top1, top5=top5) + time_string(), log)
-  mean_loss = total_loss_dis / (iterations*1)
-  mean_accuracy = total_accuracy_dis / (iterations*1)
+  mean_loss = total_loss_dis / (iterations*dis_step)
+  mean_accuracy = total_accuracy_dis / (iterations*dis_step)
   print(f'EPOCH {epoch:03d}: discriminator_loss={mean_loss:.4f}, '
              f'discriminator_accuracy={mean_accuracy:.4f}')
   state = {'net':model.state_dict(), 'optimizer':optimizer.state_dict(), 'epoch':epoch}
-  torch.save(state, './model/save_dis_train.pth.tar')
-  print_log('  **Train** Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Error@1 {error1:.3f}'.format(top1=top1, top5=top5, error1=100-top1.avg), log)
+  torch.save(state, './model/save_dis_train_temp.pth.tar')
+  print_log('  **Train** Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Error@1 {error1:.3f}'.format(top1=top1, top5=top5, \
+    error1=100-top1.avg), log)
   return top1.avg, losses.avg

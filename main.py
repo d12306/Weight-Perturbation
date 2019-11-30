@@ -31,16 +31,16 @@ parser.add_argument('--gammas', type=float, nargs='+', default=[0.1, 0.1], help=
 parser.add_argument('--print_freq', default=200, type=int, metavar='N', help='print frequency (default: 200)')
 parser.add_argument('--save_path', type=str, default='./logs', help='Folder to save checkpoints and log.')
 parser.add_argument('--gpu', type=int, default=1, help='.')
-parser.add_argument('--resume', type=str, default = './model/save_adv_train_from_pretrained.pth.tar', \
+parser.add_argument('--resume', type=str, default = './model/save_initial_train.pth.tar', \
   help='path to latest checkpoint (default: none)')
 parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('--evaluate', dest='evaluate',\
  action='store_false', help='evaluate model on validation set')
 # Acceleration
 parser.add_argument('--ngpu', type=int, default=1, help='0 = CPU.')
-parser.add_argument('--save_figurename', type=str, default='curve_adv_train.png', help='')
+parser.add_argument('--save_figurename', type=str, default='curve_adv_train_temp.png', help='')
 parser.add_argument('--action', type=int, default=0, help='')
-parser.add_argument('--workers', type=int, default=2, help='number of data loading workers (default: 2)')
+parser.add_argument('--workers', type=int, default=0, help='number of data loading workers (default: 2)')
 # random seed
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 args = parser.parse_args()
@@ -141,6 +141,7 @@ def main():
                 weight_decay=state['decay'], nesterov=True)
   # optimizer = torch.optim.Adam(net.parameters(), state['learning_rate'],
   #               weight_decay=state['decay'])
+  print('the recovered learning rate is: ', state['learning_rate'])
 
   if args.use_cuda:
     net.cuda()
@@ -181,9 +182,9 @@ def main():
   # Main loop
   start_time = time.time()
   epoch_time = AverageMeter()
+
   for epoch in range(args.start_epoch, args.epochs):
     current_learning_rate = adjust_learning_rate(optimizer, epoch, args.gammas, args.schedule)
-
     need_hour, need_mins, need_secs = convert_secs2time(epoch_time.avg * (args.epochs-epoch))
     need_time = '[Need: {:02d}:{:02d}:{:02d}]'.format(need_hour, need_mins, need_secs)
 
@@ -195,10 +196,9 @@ def main():
       # train_acc, train_los = train(train_loader, net, criterion, optimizer, epoch, log)
       train_acc, train_los = adv_train(train_loader, net, criterion, optimizer, epoch, log, args)
     else:
-      train_acc, train_los = adv_train(train_loader, net, criterion, optimizer,\
-     epoch, log, args)
-     #  train_acc, train_los = dis_train(train_loader, net, criterion, optimizer,\
-     # epoch, log, args, discriminator, discriminator_optim, net_initial)
+      # train_acc, train_los = adv_train(train_loader, net, criterion, optimizer, epoch, log, args)
+      train_acc, train_los = dis_train(train_loader, net, criterion, optimizer,\
+     epoch, log, args, discriminator, discriminator_optim, net_initial)
     # evaluate on validation set
     #val_acc,   val_los   = extract_features(test_loader, net, criterion, log)
     val_acc,   val_los   = validate(test_loader, net, criterion, log)
@@ -215,7 +215,7 @@ def main():
     # measure elapsed time
     epoch_time.update(time.time() - start_time)
     start_time = time.time()
-    recorder.plot_curve( os.path.join(args.save_path, args.save_figurename) )
+    recorder.plot_curve(os.path.join(args.save_path, args.save_figurename) )
 
   log.close()
 
